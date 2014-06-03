@@ -14,7 +14,6 @@ from sklearn.linear_model.ridge import RidgeCV
 import numpy as np
 import time
 import statsmodels.api as sm
-from pandas.stats.api import ols
 from scipy.optimize import minimize
 
 
@@ -43,7 +42,7 @@ essays_w_outcomes = essays.merge(outcomes, on='projectid')
 #Note we only have outcomes for a subset of the essays 619000/640000
 print(essays_w_outcomes['projectid'].count())
 
-#keep only where essay and outcomes is filled
+#keep only where essay and outcomes is filled (unused)
 index_nomiss_exciting = pd.notnull(essays_w_outcomes.is_exciting) 
 index_nomiss_essay = pd.notnull(essays_w_outcomes.essay)
 essays_w_outcomes = essays_w_outcomes[index_nomiss_essay & index_nomiss_exciting]
@@ -54,12 +53,11 @@ essays_w_outcomes[index_nomiss_essay & index_nomiss_exciting]
 essays_w_outcomes['essay_len'] = [len(cell) for cell in essays_w_outcomes.essay]
 essays_w_outcomes['is_essay_long'] = [len(cell)>2000 for cell in essays_w_outcomes.essay]
 
-#ooooo use a vectorizer to count word usage instances
+#use a vectorizer to count word usage instances
 
 vectorizer = TfidfVectorizer(min_df=1)
 X = vectorizer.fit_transform(essays_w_outcomes.essay)
-vectorizer2 = CountVectorizer(min_df=1)
-X_nontfidf = vectorizer.fit_transform(essays_w_outcomes.essay)
+
 # when we are really ready to do this seriously, fit transformation on train only
 # then transform the whole thing
 
