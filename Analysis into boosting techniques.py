@@ -6,74 +6,137 @@ Created on Tue Jun 24 13:40:43 2014
 """
 import pandas as pd
 from sklearn.cross_validation import cross_val_score
-from sklearn.datasets import load_iris
 from sklearn.ensemble import AdaBoostClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
-import random
-import pandas as pd
 import re
-import statsmodels.api as sts
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model.ridge import RidgeCV
+from sklearn.linear_model import LogisticRegression
 import numpy as np
 import time
 import statsmodels as sm
+from sklearn.metrics import roc_curve, auc
 from scipy.optimize import minimize
 
 outcomes= pd.read_csv("S:\General\Training\Ongoing Professional Development\Kaggle\Predicting Excitement at DonorsChoose\Data\Raw\outcomes.csv")
-outcomes.count()
-
 essays = pd.read_csv("S:\General\Training\Ongoing Professional Development\Kaggle\Predicting Excitement at DonorsChoose\Data\Raw\essays.csv")
+projects = pd.read_csv("S:\General\Training\Ongoing Professional Development\Kaggle\Predicting Excitement at DonorsChoose\Data\Raw\projects.csv")
+resource = pd.read_csv("S:\General\Training\Ongoing Professional Development\Kaggle\Predicting Excitement at DonorsChoose\Data\Raw/resources.csv")
 
-essays['word_count'] = [len(cell) for cell in essays.essay]
-
-# clean control characters out of data
+# clean control characters out of essay data
 
 for column in essays.columns:
     essays[column]= [str(cell) for cell in essays[column]]
     essays[column]= [re.sub('\W', ' ', cell) for cell in essays[column]]
+ 
+# create word count variables for the various text fields  in essay data
+text_vars = ('title', 'short_description', 'need_statement', 'essay')
+for var in text_vars:
+    new_var = 'word_count_' + var 
+    essays[new_var] = [len(cell) for cell in essays[var]]
 
-projects = pd.read_csv("S:\General\Training\Ongoing Professional Development\Kaggle\Predicting Excitement at DonorsChoose\Data\Raw\projects.csv")
+# drop messy resource data 
+
+resource_to_drop = ('vendor_name','resourceid', 'vendorid', 'item_name', 'item_number')
+for var in resource_to_drop:
+    del resource[var]
+    
+# create a variable for the sum of items requested per project
+ 
+sum_item_quant= resource.groupby('projectid')['item_quantity'].sum()
+resource= resource.merge(sum_item_quant.reset_index(), how='outer', on='projectid')
+
+# drop resource duplicates on project id (THINK ABT HOW TO IMPROVE THIS)
+
+resource = resource.drop_duplicates(cols='projectid')
+
+# merge data together on projectid
 unsplit = projects.merge(outcomes, how='outer', on='projectid')
 unsplit = unsplit.merge(essays, how='outer', on='projectid')
+unsplit = pd.merge(unsplit, resource, how='left', left_on='projectid', right_on='projectid')
 
 #outer merge, test sample is projects where is_exciting is missing
-print(unsplit['projectid'].count())
 test = unsplit[pd.isnull(unsplit.is_exciting)]
 train_and_validation = unsplit[pd.notnull(unsplit.is_exciting)]
-train_and_validation  =train_and_validation[train_and_validation.date_posted>'2012-1-1']
-train_and_validation['is_exciting'][train_and_validation['is_exciting']=='f'] = 0
+train_and_validation =train_and_validation[pd.to_datetime(train_and_validation.date_posted)>pd.to_datetime('2012-1-1')]
+train_and_validation['is_exciting'][train_and_validation['is_exciting']=='f'] = -1
 train_and_validation['is_exciting'][train_and_validation['is_exciting']=='t'] = 1 
+non_test_obs = len(train_and_validation.is_exciting)
 
+random_vector =array(np.random.rand((len(train_and_validation.is_exciting)),1))
+# create a teacher level score variable
+
+for_teacher_grouping = pd.DataFrame(train_and_validation.is_exciting[np.squeeze(random_vector>.2)].astype(int))
+for_teacher_grouping['teacher_acctid_x'] = train_and_validation['teacher_acctid_x'][np.squeeze(random_vector>.2)]
+for_teacher_grouping.rename(columns={'is_exciting': 'teacher_average'},
+                            inplace=True)
+grouped_teacher_mean =  for_teacher_grouping.groupby('teacher_acctid_x').mean()
+grouped_teacher_count =  for_teacher_grouping.groupby('teacher_acctid_x').teacher_average.count()
+pd_grpd_teach_mn = grouped_teacher_mean.reset_index()
+pd_grpd_teach_ct = grouped_teacher_count.reset_index()
+pd_grpd_teach_ct.rename(columns={0: 'count_per_teacher'},
+                        inplace=True)
+grpd_vars = pd_grpd_teach_ct.merge(pd_grpd_teach_mn, how='outer', 
+                                   on='teacher_acctid_x')
+grpd_vars['teacher_w_freqwt'] = grpd_vars.count_per_teacher*grpd_vars.teacher_average                       
+
+train_and_validation = train_and_validation.merge(grpd_vars,
+                                                  how='outer', on='teacher_acctid_x')
+test = test.merge(grpd_vars,
+                how='left', on='teacher_acctid_x')                       
 
 # add predictions from bag of words ridge to data
+def bag_of_words_ridge(variable):
+    vectorizer = TfidfVectorizer(min_df=.1, max_df=.9) #use a vectorizer to count word usage instances and create sparse matrix
+    bag_of_words_X = vectorizer.fit(train_and_validation[variable][pd.to_datetime(train_and_validation.date_posted)>pd.to_datetime('2013-11-1')])
+    # normalization of vectorizer is fit using train only
+    bag_of_words_X = vectorizer.transform(train_and_validation[variable])
+    test_bag_of_words= vectorizer.transform(test[variable])
+    ridge= RidgeCV(array([18]), store_cv_values=True, normalize=True)
+    # using data range to gaurantee recency and also run time 
+    ridge.fit(bag_of_words_X[pd.to_datetime(train_and_validation.date_posted)>pd.to_datetime('2013-11-8')], train_and_validation.is_exciting[pd.to_datetime(train_and_validation.date_posted)>pd.to_datetime('2013-11-8')])
+    var_nm = "b_of_wds_prds_" + variable
+    # put predictions into samples for use later as base classifiers in ada boost    
+    train_and_validation[var_nm]=ridge.predict(bag_of_words_X)
+    test[var_nm]=ridge.predict(test_bag_of_words)
+   
+#initialize the text fields in essays
+text_vars = ('title', 'essay', 'short_description' )
 
-vectorizer = TfidfVectorizer(min_df=.1, max_df=.9) #use a vectorizer to count word usage instances and create sparse matrix
-bag_of_words_X = vectorizer.fit(train_and_validation.essay)
-# normalization of vectorizer is fit using train only
-bag_of_words_X = vectorizer.transform(train_and_validation.essay)
-test_bag_of_words= vectorizer.transform(test.essay)
-documents = 25000
-t0= time.time()
-ridge= RidgeCV(array([18]), store_cv_values=True, normalize=True)
-# optimizer.x is the ridge penalty that minimized rmse
-ridge.fit(bag_of_words_X[0:documents], train_and_validation.is_exciting[0:documents])
-print "It took {time} minutes to run the optimized ridge".format(time=(time.time()-t0)/60)
+for var in text_vars:
+    t0 = time.time()
+    bag_of_words_ridge(var)
+    print "For " + var 
+    print "It took {timer} minutes to run the optimized ridge".format(timer=(time.time()-t0)/60)
+ 
+# export data
 
-train_and_validation['bag_of_words_predictions']=ridge.predict(bag_of_words_X)
-test['bag_of_words_predictions']=ridge.predict(test_bag_of_words)
+train_and_validation.to_csv("S:/General/Training/Ongoing Professional Development/Kaggle/Predicting Excitement at DonorsChoose/Data/Clean/7.6.2014 train_and_validation.csv", index=False)
+test.to_csv("S:/General/Training/Ongoing Professional Development/Kaggle/Predicting Excitement at DonorsChoose/Data/Clean/7.6.2014 test.csv", index=False)
 
+# keep certain vars for  modeling
 x_vars = ('students_reached',
 'total_price_excluding_optional_support', 'school_latitude',
-'school_longitude', 'is_exciting', 'word_count', 'bag_of_words_predictions')
+'school_longitude', 'is_exciting', 
+'item_quantity_y', 'item_unit_price',
+# word count vars
+'word_count_title','word_count_essay','word_count_short_description', 'word_count_need_statement',
+# bag of words regression predictions from various text features
+'b_of_wds_prds_title', 'b_of_wds_prds_essay', 'b_of_wds_prds_short_description')
 
-t_f_vars = ('school_county', 'school_charter', 'eligible_double_your_impact_match', 'eligible_almost_home_match',
+possible_vars =  ('primary_focus_subject', 'secondary_focus_subject', 'project_resource_type')
+
+t_f_vars = ('school_charter', 'eligible_double_your_impact_match', 'eligible_almost_home_match',
 'school_magnet','teacher_teach_for_america', 'teacher_ny_teaching_fellow', 
-'school_year_round', 'school_nlns', 'school_kipp', 'school_charter_ready_promise')
+'school_year_round', 'school_nlns', 'school_kipp', 'school_charter_ready_promise' )
 
-level_vars = ('resource_type', 'grade_level', 'poverty_level', 
-'primary_focus_area', 'primary_focus_subject', 'secondary_focus_subject', 'secondary_focus_area',
- 'fulfillment_labor_materials','teacher_prefix' )  
+level_vars = ('poverty_level', 'school_kipp', 'school_state', 'teacher_prefix' ,
+                    'primary_focus_subject', 'primary_focus_area', 
+                     'secondary_focus_subject', 'secondary_focus_area', 'grade_level',
+                    'resource_type')  
+ 
+#level_vars = ()
 
 # function that codes true false variables
 def code_tf_vars(input_data, output_data):
@@ -88,67 +151,145 @@ def create_score_variables(level_var, output_data, input_data):
     # at each level of a categorical variable
     grouped = train_and_validation.groupby(level_var)   
     levels = grouped.groups.keys()
-    new_var_nm = level_var + '_score'
-    output_data[new_var_nm] = .999999
     for level in levels:
-        resource_vector = train_and_validation[level_var]== level
-        score = train_and_validation['is_exciting'][resource_vector].mean()
-        output_vector = input_data[level_var]== level
-        output_data[new_var_nm][output_vector] = score 
+        new_var_nm = "is_" + str(object=level_var) + "_" + str(object=level)
+        output_data[new_var_nm ]=0
+        trues= input_data[level_var]==level
+        output_data[new_var_nm][trues] = 1   
         
 #create a data set that will use the good modeling vars from the wide data
 train_X = pd.DataFrame(train_and_validation.fulfillment_labor_materials)
-
+test_X = pd.DataFrame(test.fulfillment_labor_materials)
 #code vars that are copies of vars in full data
 for vars in x_vars:
     train_X[vars] = train_and_validation[vars] 
+    test_X[vars] = test[vars] 
 #recode missings to zero
-train_X = train_X.fillna(0)
-
+train_X.fillna(0, inplace=True)
+test_X.fillna(0, inplace=True)
 # create is_exciting score vars for many levelled vars
 for level_var in level_vars:    
     create_score_variables(level_var, train_X,train_and_validation)
-
-code_tf_vars(train_and_validation, train_X)
-features= len(train_X.columns)
-
-# code up test data identically
-
-test_X = pd.DataFrame(test.fulfillment_labor_materials)
-for vars in x_vars:
-    test_X[vars] = test[vars] 
-test_X = test_X.fillna(0)
-
-code_tf_vars(test, test_X)
-  
-for level_var in level_vars:    
     create_score_variables(level_var, test_X,test)
 
+code_tf_vars(train_and_validation, train_X)
+code_tf_vars(test, test_X)
+
+features= len(train_X.columns)  
+    
 del test_X['is_exciting']
 
 # split train and validation
-non_test_obs = len(train_and_validation.is_exciting)
-train_features = pd.DataFrame(train_X.iloc[0:(.8*non_test_obs), :])
 
+train_features = pd.DataFrame(train_X[random_vector>.2])
+train_outcome = train_features.is_exciting
 del train_features['is_exciting']
-train_outcome = train_X.is_exciting[0:(.8*non_test_obs)]
-validation = pd.DataFrame(train_X.iloc[(.8*non_test_obs+1):(non_test_obs-1),:])
-validation_for_p =pd.DataFrame(train_X.iloc[(.8*non_test_obs+1):(non_test_obs-1),:])
+validation = pd.DataFrame(train_X[random_vector<=.2])
+validation_for_p =pd.DataFrame(train_X[random_vector<=.2])
 del validation_for_p['is_exciting']
 
 # Try a bunch of different boosting techniques
-clf = AdaBoostClassifier(base_estimator=DecisionTreeClassifier(max_depth=1, max_features=features-2, splitter='best'),n_estimators = 1400, learning_rate=.04)
-clf.fit(train_features, train_outcome)
-validation['predictions']=clf.predict_proba(validation_for_p)[:,1]
-validation['predictions']= [round(cell,3) for cell in validation['predictions']]
-tester= validation.groupby('predictions')
-tester['is_exciting'].sum()/tester['is_exciting'].count()
+def run_adaboost(estimators_and_learn_rt):
+    print estimators_and_learn_rt[0]
+    print estimators_and_learn_rt[1]
+    clf = AdaBoostClassifier(base_estimator=DecisionTreeClassifier(max_depth=1, 
+                                                                   max_features=features-1,
+                                                                   splitter='best', min_samples_leaf=10),
+                                                                   n_estimators = int(estimators_and_learn_rt[0]), 
+                                                                   learning_rate=estimators_and_learn_rt[1])
+    clf.fit(train_features, train_outcome)
+    validation['predictions_clf']=clf.predict_proba(validation_for_p)[:,1]
+    fpr, tpr, thresholds = roc_curve(validation.is_exciting, validation.predictions_clf)
+    auc_score = auc(fpr,tpr)
+    return auc_score
+   
+# we run an optimizer to find the penalty that minimizes rmse of ridge
+init_guess =array([1200, .05])
+# init_guess initializes the opimization with a guess of the optimal penalty 
+   
+t0= time.time()
+optimizer = minimize(run_adaboost, init_guess, method='nelder-mead', options= {'xtol':5e-4, 'disp':True})
+print "It took {time} minutes to optimize".format(time=(time.time()-t0)/60)
+
+t0= time.time()
+run_adaboost(array([1500,.005]))
+print "It took {time} minutes to optimize".format(time=(time.time()-t0)/60)
+
+# run random forests
+
+rndm_forest_clf = RandomForestClassifier(n_estimators=25, min_samples_split=20, min_samples_leaf=4)
+rndm_forest_clf.fit(train_features, train_outcome)
+validation['predictions_forest_clf']=rndm_forest_clf.predict_proba(validation_for_p)[:,1]
+fpr, tpr, thresholds = roc_curve(validation.is_exciting, validation.predictions_clf)
+auc(fpr,tpr)
+
+# add variables that have hurt adaboost performance
+
+extra_level_vars = ( 'school_state', 'teacher_prefix' ,
+                    'primary_focus_subject', 'primary_focus_area', 
+                     'secondary_focus_subject', 'secondary_focus_area', 'grade_level',
+                    'resource_type') 
+
+for level_var in extra_level_vars:    
+    create_score_variables(level_var, train_features,train_and_validation[random_vector>.2])
+    create_score_variables(level_var, validation,train_and_validation[random_vector<=.2])
+    create_score_variables(level_var, validation_for_p,train_and_validation[random_vector<=.2])
+    create_score_variables(level_var, test_X, test)
+
+# add in teacher average
+def teacher_mean_forms(x):
+    train_features['teacher_w_freqwt'] = pd.DataFrame(train_and_validation.teacher_w_freqwt[np.squeeze(random_vector>.2)])**x
+    validation_for_p['teacher_w_freqwt'] = pd.DataFrame(train_and_validation.teacher_w_freqwt[np.squeeze(random_vector<=.2)])**x
+    test_X['teacher_w_freqwt'] = pd.DataFrame(test.teacher_w_freqwt)**x
+
+forms = (.5,2,1)
+
+for x in forms:
+    teacher_mean_forms(x)
+
+# add in a month
+np.squeeze(random_vector>.2)
+def make_month_var(input_data, output_data, sample_split_conditional ):
+    trn_feats_dates = input_data.date_posted[sample_split_conditional]
+    output_data['date_posted'] = pd.to_datetime(trn_feats_dates)
+    #output_data['month'] = month(output_data['date_posted']
+    
+make_month_var( train_and_validation, train_features, np.squeeze(random_vector>.2) )
+make_month_var( train_and_validation, validation_for_p, np.squeeze(random_vector<=.2) )
+make_month_var( testX, test, 1=1 )
+
+# create a logistic model with the adaboost and extra vars
+train_features.fillna(0, inplace=True)
+validation_for_p.fillna(0, inplace=True)
+test_X.fillna(0, inplace=True)
+
+logit = LogisticRegression()
+logit.fit(train_features, train_outcome)
+
+validation['predictions']=logit.predict_proba(validation_for_p)[:,1]
+fpr, tpr, thresholds = roc_curve(validation.is_exciting, validation.predictions)
+auc_score = auc(fpr,tpr)
+auc_score 
+    
+# add predictions to train features
+
+def add_clf_prds(classifier, name):
+    train_features[name]=classifier.predict_proba(train_features)[:,1]
+    validation_for_p[name]=classifier.predict_proba(validation_for_p)[:,1]
+    test_X[name] =classifie.predict_proba(test_X)[:,1]
+    
+add_clf_prds(rndm_forest_clf, rndm_frsts_prds)
+add_clf_prds(clf, adaboost_prds)
+add_clf_prds(logit, logit)
+
+
+
 
 # submission
 entry = pd.DataFrame(data=test['projectid']) 
-entry['is_exciting'] =clf.predict_proba(test_X)[:,1]
+entry['is_exciting'] =logit.predict_proba(test_X)[:,1]
 #entry['is_exciting'] = test.length_predictions 
-entry.to_csv("S:/General/Training/Ongoing Professional Development/Kaggle/Predicting Excitement at DonorsChoose/Data/Submissions/6.10.2014 PC submission ada pprob 2.csv", index=False)
+entry.to_csv("S:/General/Training/Ongoing Professional Development/Kaggle/Predicting Excitement at DonorsChoose/Data/Submissions/7.8.2014 PC submission logistic w weighted teacher levels not in ada 4 .csv", index=False)
 
 
 
