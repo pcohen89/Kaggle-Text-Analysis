@@ -137,7 +137,6 @@ level_vars = ('poverty_level', 'school_kipp', 'school_state', 'teacher_prefix' ,
                     'resource_type')  
  
 #level_vars = ()
-
 # function that codes true false variables
 def code_tf_vars(input_data, output_data):
     for var in t_f_vars:
@@ -215,14 +214,6 @@ t0= time.time()
 run_adaboost(array([1500,.005]))
 print "It took {time} minutes to optimize".format(time=(time.time()-t0)/60)
 
-# run random forests
-
-rndm_forest_clf = RandomForestClassifier(n_estimators=25, min_samples_split=20, min_samples_leaf=4)
-rndm_forest_clf.fit(train_features, train_outcome)
-validation['predictions_forest_clf']=rndm_forest_clf.predict_proba(validation_for_p)[:,1]
-fpr, tpr, thresholds = roc_curve(validation.is_exciting, validation.predictions_clf)
-auc(fpr,tpr)
-
 # add variables that have hurt adaboost performance
 
 extra_level_vars = ( 'school_state', 'teacher_prefix' ,
@@ -238,9 +229,10 @@ for level_var in extra_level_vars:
 
 # add in teacher average
 def teacher_mean_forms(x):
-    train_features['teacher_w_freqwt'] = pd.DataFrame(train_and_validation.teacher_w_freqwt[np.squeeze(random_vector>.2)])**x
-    validation_for_p['teacher_w_freqwt'] = pd.DataFrame(train_and_validation.teacher_w_freqwt[np.squeeze(random_vector<=.2)])**x
-    test_X['teacher_w_freqwt'] = pd.DataFrame(test.teacher_w_freqwt)**x
+    name = 'teacher_w_freqwt_' + str(object=x)
+    train_features[name] = pd.DataFrame((train_and_validation.teacher_w_freqwt[np.squeeze(random_vector>.2)])**x)
+    validation_for_p[name] = pd.DataFrame((train_and_validation.teacher_w_freqwt[np.squeeze(random_vector>.2)])**x)
+    test_X[name] = pd.DataFrame((test.teacher_w_freqwt)**x)
 
 forms = (.5,2,1)
 
@@ -248,48 +240,86 @@ for x in forms:
     teacher_mean_forms(x)
 
 # add in a month
-np.squeeze(random_vector>.2)
-def make_month_var(input_data, output_data, sample_split_conditional ):
-    trn_feats_dates = input_data.date_posted[sample_split_conditional]
-    output_data['date_posted'] = pd.to_datetime(trn_feats_dates)
+
+def make_month_var(input_data, output_data, sample_split_conditional):
+    trn_feats_dates = pd.DatetimeIndex(input_data.date_posted[sample_split_conditional])
+    output_data['date_for_mod'] = trn_feats_dates.astype(int64) //10**9
     #output_data['month'] = month(output_data['date_posted']
-    
+one_vector =array(np.random.rand((len(test.is_exciting)),1))  
 make_month_var( train_and_validation, train_features, np.squeeze(random_vector>.2) )
 make_month_var( train_and_validation, validation_for_p, np.squeeze(random_vector<=.2) )
-make_month_var( testX, test, 1=1 )
+make_month_var(  test, test_X, np.squeeze(one_vector>-1) )
 
 # create a logistic model with the adaboost and extra vars
 train_features.fillna(0, inplace=True)
 validation_for_p.fillna(0, inplace=True)
 test_X.fillna(0, inplace=True)
 
+# run random forests
+t0= time.time()
+rndm_forest_clf = RandomForestClassifier(n_estimators=600, min_samples_split=10, min_samples_leaf=3)
+rndm_forest_clf.fit(train_features, train_outcome)
+validation['predictions_forest_clf']=rndm_forest_clf.predict_proba(validation_for_p)[:,1]
+fpr, tpr, thresholds = roc_curve(validation.is_exciting, validation.predictions_forest_clf)
+auc(fpr,tpr)
+print "It took {time} minutes to run forests".format(time=(time.time()-t0)/60)
+forest_features = len(train_features.columns)
+
+#run logistic
 logit = LogisticRegression()
 logit.fit(train_features, train_outcome)
+logit_feats = len(train_features.columns)
 
 validation['predictions']=logit.predict_proba(validation_for_p)[:,1]
 fpr, tpr, thresholds = roc_curve(validation.is_exciting, validation.predictions)
 auc_score = auc(fpr,tpr)
 auc_score 
+
+# run ridge
+
+full_ridge= RidgeCV(np.array([7]), store_cv_values=True, normalize=True)
+# using data range to gaurantee recency and also run time 
+full_ridge.fit(train_features, train_outcome)
+validation['predictions']=logit.predict_proba(validation_for_p)[:,1]
+fpr, tpr, thresholds = roc_curve(validation.is_exciting, validation.predictions)
+auc_score = auc(fpr,tpr)
+auc_score 
+  
     
 # add predictions to train features
+ens_train_features['Adaboost'] = pd.DataFrame(clf.predict_proba(train_features.iloc[:,0:30])[:,1])
+validation_for_p['Adaboost'] = pd.DataFrame(clf.predict_proba(validation_for_p.iloc[:,0:30])[:,1])
+test_X['Adaboost'] = pd.DataFrame(clf.predict_proba(test_X.iloc[:,0:30])[:,1])
 
-def add_clf_prds(classifier, name):
-    train_features[name]=classifier.predict_proba(train_features)[:,1]
-    validation_for_p[name]=classifier.predict_proba(validation_for_p)[:,1]
-    test_X[name] =classifie.predict_proba(test_X)[:,1]
-    
-add_clf_prds(rndm_forest_clf, rndm_frsts_prds)
-add_clf_prds(clf, adaboost_prds)
-add_clf_prds(logit, logit)
+ens_train_features['Forest'] = rndm_forest_clf.predict_proba(train_features.iloc[:,0:forest_features])[:,1]
+validation_for_p['Forest'] = rndm_forest_clf.predict_proba(validation_for_p.iloc[:,0:forest_features])[:,1]
+test_X['Forest'] = rndm_forest_clf.predict_proba(test_X.iloc[:,0:forest_features])[:,1]
 
 
+ens_train_features['Logit'] = logit.predict_proba(train_features.iloc[:,0:logit_feats])[:,1]
+validation_for_p['Logit'] = logit.predict_proba(validation_for_p.iloc[:,0:logit_feats])[:,1]
+test_X['Logit'] = logit.predict_proba(test_X.iloc[:,0:logit_feats])[:,1]
 
+ens_train_features['Ridge'] = full_ridge.predict(train_features.iloc[:,0:logit_feats])[:,1]
+validation_for_p['Ridge'] = full_ridge.predict(validation_for_p.iloc[:,0:logit_feats])[:,1]
+test_X['Ridge'] = full_ridge.predict(test_X.iloc[:,0:logit_feats])[:,1]
+
+# final tree
+
+ens_forest_clf = RandomForestClassifier(n_estimators=600, min_samples_split=6, min_samples_leaf=2)
+ens_forest_clf.fit(ens_train_features, train_outcome)
+
+
+validation['predictions']=ens_forest_clf.predict_proba(validation_for_p.iloc[:,167:171])[:,1]
+fpr, tpr, thresholds = roc_curve(validation.is_exciting, validation.predictions)
+auc_score = auc(fpr,tpr)
+auc_score 
 
 # submission
 entry = pd.DataFrame(data=test['projectid']) 
-entry['is_exciting'] =logit.predict_proba(test_X)[:,1]
+entry['is_exciting'] =ens_logit.predict_proba(test_X.iloc[:,167:171])[:,1]
 #entry['is_exciting'] = test.length_predictions 
-entry.to_csv("S:/General/Training/Ongoing Professional Development/Kaggle/Predicting Excitement at DonorsChoose/Data/Submissions/7.8.2014 PC submission logistic w weighted teacher levels not in ada 4 .csv", index=False)
+entry.to_csv("S:/General/Training/Ongoing Professional Development/Kaggle/Predicting Excitement at DonorsChoose/Data/Submissions/7.8.2014 many model ensemble .csv", index=False)
 
 
 
